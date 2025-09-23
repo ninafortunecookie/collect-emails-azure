@@ -2,7 +2,7 @@
   "name": "api",
   "version": "1.0.0",
   "dependencies": {
-    "@azure/data-tables": "^12.7.0",
+    "@azure/data-tables": "^12.8.0",
     "nodemailer": "^6.9.4"
   }
 }
