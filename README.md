@@ -1,0 +1,1 @@
+# collect-emails-azure
