@@ -1,65 +1,66 @@
-const { TableClient, AzureNamedKeyCredential } = require("@azure/data-tables");
-const nodemailer = require("nodemailer");
+const https = require("https");
+
+function postJsonToUrl(fullUrl, bodyObj) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(fullUrl);
+    const data = JSON.stringify(bodyObj);
+    const req = https.request(
+      {
+        method: "POST",
+        hostname: u.hostname,
+        path: u.pathname + u.search, // inclut ?sv=...
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json;odata=nometadata",
+          "x-ms-version": "2019-02-02",
+          "Content-Length": Buffer.byteLength(data)
+        }
+      },
+      (res) => {
+        let chunks = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () => {
+          const text = Buffer.concat(chunks).toString("utf8");
+          resolve({ status: res.statusCode, text });
+        });
+      }
+    );
+    req.on("error", reject);
+    req.write(data);
+    req.end();
+  });
+}
 
 module.exports = async function (context, req) {
-  context.log('subscribe function called');
-
   try {
-    const email = (req.body && req.body.email || '').trim().toLowerCase();
+    const email = (req.body && req.body.email || "").trim().toLowerCase();
     if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
-      context.res = { status: 400, body: { message: 'E-mail invalide' } };
+      context.res = { status: 400, body: { message: "E-mail invalide" } };
       return;
     }
 
-    // --- Enregistrer dans Table Storage ---
-    const account = process.env.TABLE_ACCOUNT_NAME;
-    const key = process.env.TABLE_ACCOUNT_KEY;
-    const tableName = process.env.TABLE_NAME || "subscribers";
+    const tableSasUrl = process.env.TABLE_SAS_URL; // ex: https://<account>.table.core.windows.net/subscribers?<sas>
+    if (!tableSasUrl) {
+      context.res = { status: 500, body: { message: "Config manquante: TABLE_SAS_URL" } };
+      return;
+    }
 
-    if (account && key) {
-      const cred = new AzureNamedKeyCredential(account, key);
-      const tableClient = new TableClient(
-        `https://${account}.table.core.windows.net`,
-        tableName,
-        cred
-      );
+    const entity = {
+      PartitionKey: "subscribers",
+      RowKey: `${Date.now()}-${Math.random().toString(36).slice(2,8)}`,
+      email,
+      createdAt: new Date().toISOString()
+    };
 
-      try { await tableClient.createTable(); } catch (_) { /* déjà créée */ }
-
-      await tableClient.createEntity({
-        partitionKey: 'subscribers',
-        rowKey: Date.now().toString() + '-' + Math.random().toString(36).slice(2,8),
-        email,
-        createdAt: new Date().toISOString()
-      });
+    const r = await postJsonToUrl(tableSasUrl, entity);
+    if (r.status >= 200 && r.status < 300) {
+      context.res = { status: 200, body: { message: "Inscription enregistrée." } };
     } else {
-      context.log.warn('Storage non configuré (TABLE_ACCOUNT_NAME/KEY manquants).');
+      context.log("Table insert error:", r.status, r.text);
+      context.res = { status: r.status || 502, body: { message: "Enregistrement Table échoué", details: r.text } };
     }
-
-    // --- (Optionnel) Envoi d'email via SMTP ---
-    if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS && process.env.FROM_EMAIL) {
-      const transporter = nodemailer.createTransport({
-        host: process.env.SMTP_HOST,
-        port: parseInt(process.env.SMTP_PORT || "587"),
-        secure: (process.env.SMTP_SECURE === 'true'),
-        auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS }
-      });
-
-      try {
-        await transporter.sendMail({
-          from: process.env.FROM_EMAIL,
-          to: email,
-          subject: 'Merci — voici ta réduction',
-          html: `<p>Merci ! Voici ton code : <strong>TEST10</strong></p>`
-        });
-      } catch (err) {
-        context.log.error('Erreur SMTP :', err?.message || err);
-      }
-    }
-
-    context.res = { status: 200, body: { message: 'Inscription enregistrée.' } };
   } catch (err) {
-    context.log.error(err);
-    context.res = { status: 500, body: { message: 'Erreur interne' } };
+    context.log("Function error:", err);
+    context.res = { status: 500, body: { message: "Erreur interne", error: String(err) } };
   }
 };
