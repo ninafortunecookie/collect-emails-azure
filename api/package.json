@@ -1,10 +1,1 @@
-{
-  "name": "azure-api",
-  "version": "1.0.0",
-  "description": "Minimal API for email collection",
-  "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
-  "dependencies": {}
-}
+{ "name": "azure-api", "version": "1.0.0", "private": true }
