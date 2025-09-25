@@ -1,18 +1,14 @@
-// api/subscribe/index.js
-// Écrit une entité dans Azure Table Storage via une URL SAS (aucune dépendance NPM)
-
 const https = require("https");
 
 function postJsonToUrl(fullUrl, bodyObj) {
   return new Promise((resolve, reject) => {
     const u = new URL(fullUrl);
     const data = JSON.stringify(bodyObj);
-
     const req = https.request(
       {
         method: "POST",
         hostname: u.hostname,
-        path: u.pathname + u.search, // inclut le ?sv=...
+        path: u.pathname + u.search, // inclut ?sv=...
         headers: {
           "Content-Type": "application/json",
           "Accept": "application/json;odata=nometadata",
@@ -29,7 +25,6 @@ function postJsonToUrl(fullUrl, bodyObj) {
         });
       }
     );
-
     req.on("error", reject);
     req.write(data);
     req.end();
@@ -40,20 +35,27 @@ module.exports = async function (context, req) {
   try {
     const email = (req.body && req.body.email || "").trim().toLowerCase();
     if (!email || !/^\S+@\S+\.\S+$/.test(email)) {
-      context.res = { status: 400, body: { message: "E-mail invalide" } };
+      context.res = { status: 400, body: { step: "validate-email", message: "E-mail invalide" } };
       return;
     }
 
-    // IMPORTANT : mets l’URL SAS complète dans la variable d’environnement TABLE_SAS_URL
-    // Format attendu :
-    // https://<compte>.table.core.windows.net/<nomTable>?sv=...&ss=t&...
-    const tableSasUrl = process.env.TABLE_SAS_URL;
-    if (!tableSasUrl) {
-      context.res = { status: 500, body: { message: "Config manquante: TABLE_SAS_URL" } };
+    const sas = process.env.TABLE_SAS_URL || "";
+    if (!sas) {
+      context.res = { status: 500, body: { step: "config", message: "TABLE_SAS_URL manquante dans les variables d’environnement." } };
       return;
     }
 
-    // Entité à insérer
+    // Diagnostics lisibles
+    if (!sas.includes("/subscribers")) {
+      context.res = { status: 500, body: { step: "config", message: "TABLE_SAS_URL doit contenir /subscribers avant ?sv=...", value: sas.slice(0,120) + "..." } };
+      return;
+    }
+    if (!sas.includes("?sv=")) {
+      context.res = { status: 500, body: { step: "config", message: "TABLE_SAS_URL ne contient pas le token SAS (?sv=...)", value: sas.slice(0,120) + "..." } };
+      return;
+    }
+
+    // Tentative d’insertion
     const entity = {
       PartitionKey: "subscribers",
       RowKey: `${Date.now()}-${Math.random().toString(36).slice(2,8)}`,
@@ -61,23 +63,33 @@ module.exports = async function (context, req) {
       createdAt: new Date().toISOString()
     };
 
-    // Appel REST vers Table Storage
-    const r = await postJsonToUrl(tableSasUrl, entity);
+    let r;
+    try {
+      r = await postJsonToUrl(sas, entity);
+    } catch (e) {
+      context.res = { status: 500, body: { step: "https-request", message: "Erreur réseau lors de l’appel Table Storage", error: String(e) } };
+      return;
+    }
 
-    // Succès attendu : 204 (No Content). Certains environnements renvoient 201/200.
     if (r.status >= 200 && r.status < 300) {
       context.res = { status: 200, body: { message: "Inscription enregistrée." } };
       return;
     }
 
-    // Échec : on renvoie le détail pour t’aider à diagnostiquer
-    context.log("Table insert error:", r.status, r.text);
+    // Erreur côté Table Storage : on renvoie le détail pour comprendre
     context.res = {
       status: r.status || 502,
-      body: { message: "Enregistrement Table échoué", status: r.status, details: r.text }
+      body: {
+        step: "table-insert",
+        status: r.status,
+        hint:
+          r.status === 403 ? "403 = SAS invalide/expirée ou permissions insuffisantes (coche a,c,r ; début -15min ; service Table uniquement)." :
+          r.status === 404 ? "404 = URL SAS sans /subscribers OU la table subscribers n’existe pas." :
+          "Voir details pour le message complet renvoyé par Table Storage.",
+        details: r.text
+      }
     };
   } catch (err) {
-    context.log("Function error:", err);
-    context.res = { status: 500, body: { message: "Erreur interne", error: String(err) } };
+    context.res = { status: 500, body: { step: "catch", message: "Erreur interne", error: String(err) } };
   }
 };
